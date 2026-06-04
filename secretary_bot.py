@@ -1,12 +1,12 @@
 """
-Telegram Secretary Bot — Render 版本 (Webhook + 提醒功能)
+Telegram Secretary Bot — Render 版本 (Webhook + 持久化提醒)
 """
 
 import os
 import logging
 import asyncio
-from datetime import datetime, timedelta
 import re
+from datetime import datetime, timedelta
 
 from flask import Flask, request, Response
 from telegram import Update, Bot
@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 import google.generativeai as genai
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -57,12 +58,17 @@ logger = logging.getLogger(__name__)
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(
-    model_name="gemini-3.1-flash-lite",
+    model_name="gemini-2.5-flash",
     system_instruction=SYSTEM_PROMPT,
 )
 
 chat_sessions: dict = {}
-scheduler = BackgroundScheduler()
+
+# 用 SQLite 持久化存储提醒，重启后不丢失
+jobstores = {
+    'default': SQLAlchemyJobStore(url='sqlite:///reminders.db')
+}
+scheduler = BackgroundScheduler(jobstores=jobstores)
 scheduler.start()
 
 def get_session(chat_id: int):
@@ -84,7 +90,8 @@ def send_reminder(chat_id: int, message: str):
     """定时器触发时发提醒消息"""
     async def _send():
         bot = Bot(token=TELEGRAM_TOKEN)
-        await bot.send_message(chat_id=chat_id, text=f"⏰ 提醒：{message}")
+        async with bot:
+            await bot.send_message(chat_id=chat_id, text=f"⏰ 提醒：{message}")
     run_async(_send())
 
 
@@ -130,20 +137,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = session.send_message(user_text)
         full_reply = response.text
 
-        # 检查有没有 REMINDER 指令
         reminder_match = re.search(r'REMINDER\|(\d+)\|(.+)', full_reply)
         if reminder_match:
             minutes = int(reminder_match.group(1))
             reminder_text = reminder_match.group(2).strip()
-            # 删掉 REMINDER 那行，只显示正常回复
             reply = re.sub(r'\nREMINDER\|.*', '', full_reply).strip()
-            # 设定定时器
             run_time = datetime.now() + timedelta(minutes=minutes)
             scheduler.add_job(
                 send_reminder,
                 'date',
                 run_date=run_time,
                 args=[chat_id, reminder_text],
+                misfire_grace_time=300,  # 服务重启后5分钟内仍会补发
             )
             logger.info(f"已设置提醒：{minutes}分钟后 — {reminder_text}")
         else:
