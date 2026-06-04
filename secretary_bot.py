@@ -4,9 +4,9 @@ Telegram Secretary Bot — Render 版本 (Webhook)
 部署到 Render 用 webhook 模式，不需要一直 polling。
 
 环境变量（在 Render 里设置，不要直接写在代码里）：
-  TELEGRAM_TOKEN   — Telegram Bot Token
-  GEMINI_API_KEY   — Gemini API Key
-  RENDER_URL       — 你的 Render 网址，例如 https://my-bot.onrender.com
+  TELEGRAM_TOKEN   — 8454500953:AAEo09eLO4f4QKKH2TRPYDe2qFY6jM7fJZM
+  GEMINI_API_KEY   — AQ.Ab8RN6JGLygX3uTVDnQOFVr61SAehO1XS8ZPhIn2KXriNKg2iw
+  RENDER_URL       — https://telegram-secretary.onrender.com
 """
 
 import os
