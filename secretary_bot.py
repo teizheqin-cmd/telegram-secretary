@@ -151,7 +151,7 @@ def get_session(chat_id: int):
     today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
     prompt = SYSTEM_PROMPT.replace("{TODAY}", today)
     if chat_id not in chat_sessions:
-        m = genai.GenerativeModel(model_name="gemini-2.5-flash", system_instruction=prompt)
+        m = genai.GenerativeModel(model_name="gemini-3.1-flash-lite", system_instruction=prompt)
         chat_sessions[chat_id] = m.start_chat(history=[])
     return chat_sessions[chat_id]
 
