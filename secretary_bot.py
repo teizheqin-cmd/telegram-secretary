@@ -1,19 +1,12 @@
 """
 Telegram Secretary Bot — Render 版本 (Webhook)
-==============================================
-部署到 Render 用 webhook 模式，不需要一直 polling。
-
-环境变量（在 Render 里设置，不要直接写在代码里）：
-  TELEGRAM_TOKEN   — 8454500953:AAEo09eLO4f4QKKH2TRPYDe2qFY6jM7fJZM
-  GEMINI_API_KEY   — AQ.Ab8RN6JGLygX3uTVDnQOFVr61SAehO1XS8ZPhIn2KXriNKg2iw
-  RENDER_URL       — https://telegram-secretary.onrender.com
 """
 
 import os
 import logging
 import asyncio
 from flask import Flask, request, Response
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,11 +16,9 @@ from telegram.ext import (
 )
 import google.generativeai as genai
 
-# ─── 从环境变量读取（在 Render Dashboard 里设置）─────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-RENDER_URL = os.environ["RENDER_URL"]  # 例如 https://my-bot.onrender.com
-# ────────────────────────────────────────────────────────────
+RENDER_URL = os.environ["RENDER_URL"]
 
 SYSTEM_PROMPT = """你是一个私人秘书助理。你的职责是：
 - 回答主人提出的任何问题
@@ -58,7 +49,6 @@ def get_session(chat_id: int):
     return chat_sessions[chat_id]
 
 
-# ─── 指令处理 ────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 你好，我是你的私人秘书！\n\n"
@@ -79,8 +69,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📋 使用方法：\n\n"
         "• 直接发消息 → 我会回答\n"
-        "• /clear → 清除记忆，重新开始\n\n"
-        "我会记住我们的对话，所以你可以接着问。"
+        "• /clear → 清除记忆，重新开始\n"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,18 +82,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = response.text
     except Exception as e:
         logger.error(f"Gemini 出错: {e}")
-        reply = f"⚠️ 出了点问题，请稍后再试。"
+        reply = "⚠️ 出了点问题，请稍后再试。"
     await update.message.reply_text(reply)
 
 
-# ─── Flask + Webhook ─────────────────────────────────────────
-flask_app = Flask(__name__)
-
-# 构建 PTB Application
+# ─── 初始化 PTB Application ──────────────────────────────────
 ptb_app = (
     Application.builder()
     .token(TELEGRAM_TOKEN)
-    .updater(None)  # webhook 模式不需要 updater
+    .updater(None)
     .build()
 )
 
@@ -113,24 +99,28 @@ ptb_app.add_handler(CommandHandler("clear", clear))
 ptb_app.add_handler(CommandHandler("help", help_command))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+# 在模块加载时初始化（关键修复）
+asyncio.get_event_loop().run_until_complete(ptb_app.initialize())
+
+
+# ─── Flask ───────────────────────────────────────────────────
+flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def index():
     return "Bot is running!", 200
 
-
 @flask_app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, ptb_app.bot)
-    asyncio.run(ptb_app.process_update(update))
+    asyncio.get_event_loop().run_until_complete(ptb_app.process_update(update))
     return Response("ok", status=200)
-
 
 @flask_app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
-    asyncio.run(ptb_app.bot.set_webhook(url=url))
+    asyncio.get_event_loop().run_until_complete(ptb_app.bot.set_webhook(url=url))
     return f"Webhook 已设置到: {url}", 200
 
 
