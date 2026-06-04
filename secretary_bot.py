@@ -48,6 +48,17 @@ def get_session(chat_id: int):
         chat_sessions[chat_id] = model.start_chat(history=[])
     return chat_sessions[chat_id]
 
+def run_async(coro):
+    """在任何线程里安全地跑 async 函数"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -99,8 +110,7 @@ ptb_app.add_handler(CommandHandler("clear", clear))
 ptb_app.add_handler(CommandHandler("help", help_command))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# 在模块加载时初始化（关键修复）
-asyncio.get_event_loop().run_until_complete(ptb_app.initialize())
+run_async(ptb_app.initialize())
 
 
 # ─── Flask ───────────────────────────────────────────────────
@@ -114,13 +124,13 @@ def index():
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, ptb_app.bot)
-    asyncio.get_event_loop().run_until_complete(ptb_app.process_update(update))
+    run_async(ptb_app.process_update(update))
     return Response("ok", status=200)
 
 @flask_app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
-    asyncio.get_event_loop().run_until_complete(ptb_app.bot.set_webhook(url=url))
+    run_async(ptb_app.bot.set_webhook(url=url))
     return f"Webhook 已设置到: {url}", 200
 
 
