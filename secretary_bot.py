@@ -1,22 +1,15 @@
 """
-Telegram Secretary Bot — Render 版本 (Webhook + 持久化提醒)
+Telegram Secretary Bot — 纯同步版本 (Flask + requests)
+彻底避免 asyncio 冲突
 """
 
 import os
 import logging
-import asyncio
 import re
 from datetime import datetime, timedelta
 
-from flask import Flask, request, Response
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+import requests
+from flask import Flask, request as flask_request, Response
 import google.generativeai as genai
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -24,6 +17,7 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 RENDER_URL = os.environ["RENDER_URL"]
+TG_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 SYSTEM_PROMPT = """你是一个私人秘书助理。你的职责是：
 - 回答主人提出的任何问题
@@ -45,9 +39,6 @@ REMINDER|<分钟数>|<提醒内容>
 主人说："1小时后提醒我开会"
 你回复："好的，1小时后提醒你开会。\nREMINDER|60|开会"
 
-主人说："明天早上9点提醒我交报告"（假设现在是晚上10点）
-你回复："好的，明天早上9点提醒你交报告。\nREMINDER|660|交报告"
-
 如果主人没有要求提醒，正常回答，不要加 REMINDER 行。"""
 
 logging.basicConfig(
@@ -64,77 +55,70 @@ model = genai.GenerativeModel(
 
 chat_sessions: dict = {}
 
-# 用 SQLite 持久化存储提醒，重启后不丢失
-jobstores = {
-    'default': SQLAlchemyJobStore(url='sqlite:///reminders.db')
-}
+jobstores = {'default': SQLAlchemyJobStore(url='sqlite:///reminders.db')}
 scheduler = BackgroundScheduler(jobstores=jobstores)
 scheduler.start()
 
+
+# ─── Telegram 工具函数（纯同步）────────────────────────────
+def tg_send(chat_id: int, text: str):
+    requests.post(f"{TG_API}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": text,
+    })
+
+def tg_typing(chat_id: int):
+    requests.post(f"{TG_API}/sendChatAction", json={
+        "chat_id": chat_id,
+        "action": "typing",
+    })
+
+
+# ─── 提醒发送函数 ────────────────────────────────────────────
+def send_reminder(chat_id: int, message: str):
+    tg_send(chat_id, f"⏰ 提醒：{message}")
+
+
+# ─── 消息处理 ────────────────────────────────────────────────
 def get_session(chat_id: int):
     if chat_id not in chat_sessions:
         chat_sessions[chat_id] = model.start_chat(history=[])
     return chat_sessions[chat_id]
 
-def run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
-
-def send_reminder(chat_id: int, message: str):
-    """定时器触发时发提醒消息"""
-    async def _send():
-        bot = Bot(token=TELEGRAM_TOKEN)
-        async with bot:
-            await bot.send_message(chat_id=chat_id, text=f"⏰ 提醒：{message}")
-    run_async(_send())
-
-
-# ─── 指令处理 ────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+def handle_start(chat_id: int):
+    tg_send(chat_id,
         "👋 你好，我是你的私人秘书！\n\n"
         "直接发消息给我就行，问什么都可以。\n\n"
         "提醒例子：\n"
         "• 30分钟后提醒我喝水\n"
-        "• 1小时后提醒我开会\n"
-        "• 明天早上9点提醒我交报告\n\n"
+        "• 1小时后提醒我开会\n\n"
         "指令：\n"
         "/start — 开始\n"
         "/clear — 清除对话记忆\n"
         "/reminders — 查看待办提醒"
     )
 
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+def handle_clear(chat_id: int):
     if chat_id in chat_sessions:
         del chat_sessions[chat_id]
-    await update.message.reply_text("✅ 对话记忆已清除，重新开始吧！")
+    tg_send(chat_id, "✅ 对话记忆已清除，重新开始吧！")
 
-async def reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_reminders(chat_id: int):
     jobs = scheduler.get_jobs()
     if not jobs:
-        await update.message.reply_text("📋 目前没有待办提醒。")
+        tg_send(chat_id, "📋 目前没有待办提醒。")
         return
     msg = "📋 待办提醒：\n\n"
     for job in jobs:
         run_time = job.next_run_time.strftime("%m-%d %H:%M") if job.next_run_time else "?"
         msg += f"• {run_time} — {job.args[1]}\n"
-    await update.message.reply_text(msg)
+    tg_send(chat_id, msg)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_text = update.message.text
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
+def handle_text(chat_id: int, text: str):
+    tg_typing(chat_id)
     try:
         session = get_session(chat_id)
-        response = session.send_message(user_text)
+        response = session.send_message(text)
         full_reply = response.text
 
         reminder_match = re.search(r'REMINDER\|(\d+)\|(.+)', full_reply)
@@ -148,7 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'date',
                 run_date=run_time,
                 args=[chat_id, reminder_text],
-                misfire_grace_time=300,  # 服务重启后5分钟内仍会补发
+                misfire_grace_time=300,
             )
             logger.info(f"已设置提醒：{minutes}分钟后 — {reminder_text}")
         else:
@@ -158,23 +142,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"出错: {e}")
         reply = "⚠️ 出了点问题，请稍后再试。"
 
-    await update.message.reply_text(reply)
-
-
-# ─── 初始化 PTB ──────────────────────────────────────────────
-ptb_app = (
-    Application.builder()
-    .token(TELEGRAM_TOKEN)
-    .updater(None)
-    .build()
-)
-
-ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CommandHandler("clear", clear))
-ptb_app.add_handler(CommandHandler("reminders", reminders))
-ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-run_async(ptb_app.initialize())
+    tg_send(chat_id, reply)
 
 
 # ─── Flask ───────────────────────────────────────────────────
@@ -186,16 +154,30 @@ def index():
 
 @flask_app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, ptb_app.bot)
-    run_async(ptb_app.process_update(update))
+    data = flask_request.get_json(force=True)
+    msg = data.get("message") or data.get("edited_message")
+    if not msg:
+        return Response("ok", status=200)
+
+    chat_id = msg["chat"]["id"]
+    text = msg.get("text", "")
+
+    if text == "/start":
+        handle_start(chat_id)
+    elif text == "/clear":
+        handle_clear(chat_id)
+    elif text == "/reminders":
+        handle_reminders(chat_id)
+    elif text:
+        handle_text(chat_id, text)
+
     return Response("ok", status=200)
 
 @flask_app.route("/set_webhook", methods=["GET"])
 def set_webhook():
     url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
-    run_async(ptb_app.bot.set_webhook(url=url))
-    return f"Webhook 已设置到: {url}", 200
+    resp = requests.post(f"{TG_API}/setWebhook", json={"url": url})
+    return f"Webhook 已设置到: {url} | 结果: {resp.json()}", 200
 
 
 if __name__ == "__main__":
