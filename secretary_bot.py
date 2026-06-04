@@ -290,14 +290,22 @@ def oauth_callback():
     )
     flow.fetch_token(code=code)
     refresh_token = flow.credentials.refresh_token
+    logger.info(f"=== REFRESH TOKEN: {refresh_token} ===")
 
-    # 告诉用户把 refresh token 存进 Render 环境变量
-    tg_send(chat_id,
-        f"✅ 授权成功！\n\n"
-        f"为了让连接永久有效，请去 Render → Environment 添加：\n\n"
-        f"GOOGLE_REFRESH_TOKEN = {refresh_token}\n\n"
-        f"保存后就不需要再重新连接了！"
-    )
+    if refresh_token:
+        tg_send(chat_id,
+            f"✅ 授权成功！\n\n"
+            f"请去 Render → Environment 添加：\n\n"
+            f"GOOGLE_REFRESH_TOKEN = {refresh_token}\n\n"
+            f"保存后永久有效，不需要再重新连接！"
+        )
+    else:
+        # Google 没有返回 refresh token，让用户重新撤销再授权
+        tg_send(chat_id,
+            "⚠️ 授权成功但未拿到 refresh token。\n\n"
+            "请去以下链接撤销授权后重新发送 /connect：\n"
+            "https://myaccount.google.com/permissions"
+        )
     return "<h2>✅ 授权成功！回到 Telegram 查看下一步。</h2>", 200
 
 @flask_app.route("/set_webhook", methods=["GET"])
